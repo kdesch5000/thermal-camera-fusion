@@ -1,0 +1,6 @@
+adafruit-circuitpython-mlx90640
+picamera2
+numpy
+opencv-python
+pillow
+pygame
