@@ -1,0 +1,10 @@
+# Virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# Calibration file
+thermal_calibration.json
+
+# OS files
+.DS_Store
