@@ -29,18 +29,44 @@ sudo raspi-config
 ```
 
 4. Connect the MLX90640 to your Pi:
-- VIN to 3.3V
-- GND to GND
-- SCL to SCL (GPIO 3)
-- SDA to SDA (GPIO 2)
+
+**Wiring Connections:**
+```
+MLX90640        Raspberry Pi 5 GPIO
+--------        -------------------
+VIN      →      Pin 1  (3.3V)
+SDA      →      Pin 3  (GPIO 2 / SDA)
+SCL      →      Pin 5  (GPIO 3 / SCL)
+GND      →      Pin 6  (GND)
+```
+
+**Important Notes:**
+- Use 3.3V power (NOT 5V) - Pin 1 or Pin 17
+- SDA connects to GPIO 2 (Pin 3)
+- SCL connects to GPIO 3 (Pin 5)
+- Any ground pin works (Pin 6, 9, 14, 20, 25, 30, 34, or 39)
+- No external pull-up resistors needed (Pi has built-in I2C pull-ups)
+
+See [wiring_diagram.txt](wiring_diagram.txt) for detailed pinout diagram.
+
+5. Verify the thermal camera is detected:
+```bash
+i2cdetect -y 1
+```
+You should see device at address `0x33`
 
 ## Usage
 
 1. Create and activate a virtual environment:
 ```bash
-python3 -m venv venv
+python3 -m venv --system-site-packages venv
 source venv/bin/activate
 pip3 install -r requirements.txt
+```
+
+**Note:** The script will auto-activate the virtual environment if it exists, so you can also run it directly:
+```bash
+python3 thermal_camera_fusion.py --demo --width 800 --height 480
 ```
 
 2. Run the application:
@@ -69,12 +95,27 @@ python3 thermal_camera_fusion.py --help
 
 ### Controls
 
-**Basic Controls:**
+**Touchscreen Controls:**
+
+The application includes an on-screen button interface for touchscreen displays:
+
+**Top Row:**
+- **Fusion** button: Switch to fusion mode (camera + thermal overlay)
+- **Thermal** button: Switch to thermal-only mode
+- **Video** button: Switch to video-only mode (no thermal)
+- **Calibrate** button: Toggle calibration grid and controls
+
+**Bottom Row (visible when Calibrate is active):**
+- **← → ↑ ↓** buttons: Move thermal overlay position
+- **[ ]** buttons: Scale thermal overlay smaller/larger
+- **, .** buttons: Rotate thermal overlay left/right
+- **Save** button: Save calibration to file
+
+**Keyboard Controls (alternative):**
 - `q` or `ESC`: Quit the application
 - `t`: Toggle thermal-only mode
+- `v`: Toggle video-only mode
 - `+`/`-`: Adjust thermal overlay intensity (fusion alpha)
-
-**Calibration Controls:**
 - **Arrow keys**: Move thermal overlay (position adjustment)
 - `[`/`]`: Scale thermal overlay smaller/larger
 - `,`/`.`: Rotate thermal overlay left/right (5° increments)
@@ -85,6 +126,15 @@ python3 thermal_camera_fusion.py --help
 
 Since the thermal camera and regular camera are physically offset and have different fields of view, you'll need to calibrate the overlay alignment:
 
+**Using Touchscreen:**
+1. Tap the **Calibrate** button to show the calibration grid and controls
+2. Use the **← → ↑ ↓** buttons to move the thermal overlay to align with the camera view
+3. Use **[ ]** buttons to adjust the scale if the thermal field of view doesn't match
+4. Use **, .** buttons to rotate if the cameras are mounted at different angles
+5. Tap **Save** to save your calibration settings
+6. Tap **Calibrate** again to hide the calibration controls
+
+**Using Keyboard:**
 1. Press `c` to enable the calibration grid
 2. Use **arrow keys** to move the thermal overlay to align with the camera view
 3. Use `[`/`]` to adjust the scale if the thermal field of view doesn't match
@@ -97,14 +147,16 @@ Calibration settings are saved to `thermal_calibration.json` and loaded automati
 ## Features
 
 - Real-time thermal camera overlay on regular camera feed
+- Three display modes: Fusion, Thermal-only, and Video-only
+- Touchscreen button interface for easy control
 - Manual alignment controls for position, scale, and rotation
 - Adjustable fusion alpha (transparency)
 - Temperature scale with min/max display
 - FPS counter
-- Thermal-only mode
 - Calibration grid with live parameter display
 - Persistent calibration settings
 - Color-coded temperature visualization using JET colormap
+- Demo mode for testing without hardware
 
 ## Display Settings
 

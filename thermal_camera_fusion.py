@@ -4,6 +4,22 @@ Thermal Camera Fusion for Raspberry Pi 5
 Fuses MLX90640 thermal camera data with Pi Camera video
 """
 
+import sys
+import os
+
+# Auto-activate virtual environment if not already activated
+if not hasattr(sys, 'real_prefix') and not (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
+    venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
+    if os.path.exists(venv_path):
+        activate_script = os.path.join(venv_path, 'bin', 'activate_this.py')
+        # For newer Python versions without activate_this.py, we need to adjust sys.path
+        if not os.path.exists(activate_script):
+            site_packages = os.path.join(venv_path, 'lib', f'python{sys.version_info.major}.{sys.version_info.minor}', 'site-packages')
+            if os.path.exists(site_packages):
+                sys.path.insert(0, site_packages)
+        else:
+            exec(open(activate_script).read(), {'__file__': activate_script})
+
 import time
 import numpy as np
 import cv2
@@ -11,17 +27,22 @@ from picamera2 import Picamera2
 import pygame
 from PIL import Image
 import json
-import os
 import argparse
+
+# Force SDL to position window at specific location if needed
+# This helps with multi-monitor setups
+if 'SDL_VIDEO_WINDOW_POS' not in os.environ:
+    os.environ['SDL_VIDEO_WINDOW_POS'] = '0,0'
 
 
 class ThermalCameraFusion:
-    def __init__(self, display_width=1920, display_height=1080, config_file="thermal_calibration.json", demo_mode=False):
+    def __init__(self, display_width=1920, display_height=1080, config_file="thermal_calibration.json", demo_mode=False, windowed=False):
         """Initialize thermal camera, regular camera, and display"""
         self.display_width = display_width
         self.display_height = display_height
         self.config_file = config_file
         self.demo_mode = demo_mode
+        self.windowed = windowed
 
         # Thermal overlay calibration parameters
         self.thermal_offset_x = 0
@@ -64,7 +85,10 @@ class ThermalCameraFusion:
         # Initialize pygame for display
         print("Initializing display...")
         pygame.init()
-        self.screen = pygame.display.set_mode((display_width, display_height), pygame.FULLSCREEN)
+        if windowed:
+            self.screen = pygame.display.set_mode((display_width, display_height))
+        else:
+            self.screen = pygame.display.set_mode((display_width, display_height), pygame.FULLSCREEN)
         pygame.display.set_caption("Thermal Camera Fusion")
 
         # Color map for thermal data (iron colormap approximation)
@@ -245,6 +269,65 @@ class ThermalCameraFusion:
 
         return frame
 
+    def draw_touch_buttons(self, frame, show_thermal_only, show_video_only, show_calibration):
+        """Draw touchscreen buttons overlay"""
+        h, w = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Scale button sizes based on display size
+        btn_height = max(40, int(h * 0.08))
+        btn_width = max(80, int(w * 0.08))
+        margin = max(5, int(w * 0.01))
+
+        # Calculate button width for calibration buttons
+        cal_btn_width = max(50, int(w * 0.06))
+
+        # Define buttons (x, y, width, height, label, active)
+        buttons = [
+            # Mode buttons (top row)
+            (margin, margin, btn_width, btn_height, "Fusion", not show_thermal_only and not show_video_only),
+            (margin + btn_width + margin, margin, btn_width, btn_height, "Thermal", show_thermal_only),
+            (margin + (btn_width + margin) * 2, margin, btn_width, btn_height, "Video", show_video_only),
+
+            # Calibration button
+            (w - btn_width - margin, margin, btn_width, btn_height, "Calibrate", show_calibration),
+
+            # Control buttons (bottom row) - only show in calibration mode
+        ]
+
+        # Add calibration control buttons if in calibration mode
+        if show_calibration:
+            # Calculate positions for calibration buttons
+            btn_spacing = cal_btn_width + margin
+            cal_buttons = [
+                (margin, h - btn_height - margin, cal_btn_width, btn_height, "LEFT", False),
+                (margin + btn_spacing, h - btn_height - margin, cal_btn_width, btn_height, "RIGHT", False),
+                (margin + btn_spacing * 2, h - btn_height - margin, cal_btn_width, btn_height, "UP", False),
+                (margin + btn_spacing * 3, h - btn_height - margin, cal_btn_width, btn_height, "DOWN", False),
+                (margin + btn_spacing * 4, h - btn_height - margin, cal_btn_width, btn_height, "SCALE-", False),
+                (margin + btn_spacing * 5, h - btn_height - margin, cal_btn_width, btn_height, "SCALE+", False),
+                (margin + btn_spacing * 6, h - btn_height - margin, cal_btn_width, btn_height, "ROT-", False),
+                (margin + btn_spacing * 7, h - btn_height - margin, cal_btn_width, btn_height, "ROT+", False),
+                (w - btn_width - margin, h - btn_height - margin, btn_width, btn_height, "Save", False),
+            ]
+            buttons.extend(cal_buttons)
+
+        # Draw buttons
+        for btn in buttons:
+            x, y, bw, bh, label, active = btn
+            # Button background
+            color = (0, 180, 0) if active else (60, 60, 60)
+            cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, -1)
+            # Button border
+            cv2.rectangle(frame, (x, y), (x + bw, y + bh), (200, 200, 200), 2)
+            # Button text
+            text_size = cv2.getTextSize(label, font, 0.6, 2)[0]
+            text_x = x + (bw - text_size[0]) // 2
+            text_y = y + (bh + text_size[1]) // 2
+            cv2.putText(frame, label, (text_x, text_y), font, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+        return frame, buttons
+
     def save_calibration(self):
         """Save calibration parameters to file"""
         calibration = {
@@ -277,6 +360,7 @@ class ThermalCameraFusion:
         print("Controls:")
         print("  q/ESC: Quit")
         print("  t: Toggle thermal-only mode")
+        print("  v: Toggle video-only mode")
         print("  +/-: Adjust fusion alpha")
         print("  Arrow keys: Move thermal overlay")
         print("  [/]: Scale thermal overlay")
@@ -288,7 +372,11 @@ class ThermalCameraFusion:
         fps_time = time.time()
         frame_count = 0
         show_calibration = False
+        show_video_only = False
         move_step = 10
+        buttons = []
+        last_touch_time = 0
+        touch_debounce = 0.3  # 300ms debounce
 
         try:
             while running:
@@ -296,12 +384,80 @@ class ThermalCameraFusion:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
+                    elif event.type == pygame.MOUSEBUTTONDOWN or event.type == pygame.FINGERDOWN:
+                        # Debounce touch events to prevent double-triggering
+                        current_time = time.time()
+                        if current_time - last_touch_time < touch_debounce:
+                            continue
+                        last_touch_time = current_time
+
+                        # Handle touch/click events
+                        if event.type == pygame.FINGERDOWN:
+                            # Convert normalized touch coordinates (0-1) to pixel coordinates
+                            # In fullscreen, get the actual window size which may differ from display_width/height
+                            window_size = self.screen.get_size()
+                            mouse_x = int(event.x * window_size[0])
+                            mouse_y = int(event.y * window_size[1])
+                        else:
+                            mouse_x, mouse_y = event.pos
+
+                        for btn in buttons:
+                            x, y, bw, bh, label, active = btn
+                            if x <= mouse_x <= x + bw and y <= mouse_y <= y + bh:
+                                # Button clicked
+                                if label == "Fusion":
+                                    show_thermal_only = False
+                                    show_video_only = False
+                                    print("Fusion mode")
+                                elif label == "Thermal":
+                                    show_thermal_only = True
+                                    show_video_only = False
+                                    print("Thermal-only mode")
+                                elif label == "Video":
+                                    show_video_only = True
+                                    show_thermal_only = False
+                                    print("Video-only mode")
+                                elif label == "Calibrate":
+                                    show_calibration = not show_calibration
+                                    print(f"Calibration grid: {show_calibration}")
+                                elif label == "LEFT":
+                                    self.thermal_offset_x -= move_step
+                                    print(f"Offset X: {self.thermal_offset_x}")
+                                elif label == "RIGHT":
+                                    self.thermal_offset_x += move_step
+                                    print(f"Offset X: {self.thermal_offset_x}")
+                                elif label == "UP":
+                                    self.thermal_offset_y -= move_step
+                                    print(f"Offset Y: {self.thermal_offset_y}")
+                                elif label == "DOWN":
+                                    self.thermal_offset_y += move_step
+                                    print(f"Offset Y: {self.thermal_offset_y}")
+                                elif label == "SCALE-":
+                                    self.thermal_scale = max(0.1, self.thermal_scale - 0.1)
+                                    print(f"Scale: {self.thermal_scale:.2f}x")
+                                elif label == "SCALE+":
+                                    self.thermal_scale = min(3.0, self.thermal_scale + 0.1)
+                                    print(f"Scale: {self.thermal_scale:.2f}x")
+                                elif label == "ROT-":
+                                    self.thermal_rotation -= 5.0
+                                    print(f"Rotation: {self.thermal_rotation:.1f}deg")
+                                elif label == "ROT+":
+                                    self.thermal_rotation += 5.0
+                                    print(f"Rotation: {self.thermal_rotation:.1f}deg")
+                                elif label == "Save":
+                                    self.save_calibration()
+                                break
                     elif event.type == pygame.KEYDOWN:
                         if event.key == pygame.K_q or event.key == pygame.K_ESCAPE:
                             running = False
                         elif event.key == pygame.K_t:
                             show_thermal_only = not show_thermal_only
+                            show_video_only = False
                             print(f"Thermal-only mode: {show_thermal_only}")
+                        elif event.key == pygame.K_v:
+                            show_video_only = not show_video_only
+                            show_thermal_only = False
+                            print(f"Video-only mode: {show_video_only}")
                         elif event.key == pygame.K_EQUALS or event.key == pygame.K_PLUS:
                             fusion_alpha = min(1.0, fusion_alpha + 0.1)
                             print(f"Fusion alpha: {fusion_alpha:.1f}")
@@ -356,8 +512,10 @@ class ThermalCameraFusion:
                 thermal_data = self.read_thermal_frame()
                 thermal_image, min_temp, max_temp = self.process_thermal_image(thermal_data)
 
-                # Fuse or show thermal only
-                if show_thermal_only:
+                # Determine display mode
+                if show_video_only:
+                    display_frame = camera_frame
+                elif show_thermal_only:
                     display_frame = thermal_image.copy()
                     # Expand to full size if smaller
                     if thermal_image.shape[:2] != camera_frame.shape[:2]:
@@ -380,12 +538,16 @@ class ThermalCameraFusion:
                 else:
                     display_frame = self.fuse_images(camera_frame, thermal_image, fusion_alpha)
 
-                # Add temperature overlay
-                display_frame = self.draw_temperature_overlay(display_frame, min_temp, max_temp)
+                # Add temperature overlay (skip in video-only mode)
+                if not show_video_only:
+                    display_frame = self.draw_temperature_overlay(display_frame, min_temp, max_temp)
 
                 # Add calibration grid if enabled
                 if show_calibration:
                     display_frame = self.draw_calibration_grid(display_frame)
+
+                # Draw touchscreen buttons
+                display_frame, buttons = self.draw_touch_buttons(display_frame, show_thermal_only, show_video_only, show_calibration)
 
                 # Calculate and display FPS
                 frame_count += 1
@@ -419,6 +581,8 @@ def main():
     parser = argparse.ArgumentParser(description='Thermal Camera Fusion for Raspberry Pi 5')
     parser.add_argument('--demo', action='store_true',
                         help='Run in demo mode with simulated thermal data (no MLX90640 required)')
+    parser.add_argument('--windowed', action='store_true',
+                        help='Run in windowed mode instead of fullscreen')
     parser.add_argument('--width', type=int, default=1920,
                         help='Display width (default: 1920)')
     parser.add_argument('--height', type=int, default=1080,
@@ -432,7 +596,8 @@ def main():
     fusion = ThermalCameraFusion(
         display_width=args.width,
         display_height=args.height,
-        demo_mode=args.demo
+        demo_mode=args.demo,
+        windowed=args.windowed
     )
     fusion.run(fusion_alpha=args.alpha)
 
