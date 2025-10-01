@@ -28,6 +28,7 @@ import pygame
 from PIL import Image
 import json
 import argparse
+from datetime import datetime
 
 # Force SDL to position window at specific location if needed
 # This helps with multi-monitor setups
@@ -93,6 +94,11 @@ class ThermalCameraFusion:
 
         # Color map for thermal data (iron colormap approximation)
         self.colormap = cv2.COLORMAP_JET
+
+        # Recording state
+        self.recording = False
+        self.video_writer = None
+        self.recording_start_time = None
 
     def read_thermal_frame(self):
         """Read frame from thermal camera or generate demo data"""
@@ -269,6 +275,45 @@ class ThermalCameraFusion:
 
         return frame
 
+    def take_snapshot(self, frame):
+        """Save current frame as JPEG with timestamp"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"thermal_snapshot_{timestamp}.jpg"
+        # Rotate 90 degrees clockwise
+        rotated_frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        cv2.imwrite(filename, rotated_frame)
+        print(f"Snapshot saved: {filename}")
+        return filename
+
+    def start_recording(self, frame_width, frame_height):
+        """Start video recording"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"thermal_video_{timestamp}.mp4"
+
+        # Use H.264 codec (MP4V as fallback) for cross-platform compatibility
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fps = 10.0  # Recording FPS
+
+        self.video_writer = cv2.VideoWriter(filename, fourcc, fps, (frame_width, frame_height))
+        self.recording = True
+        self.recording_start_time = time.time()
+        print(f"Recording started: {filename}")
+        return filename
+
+    def stop_recording(self):
+        """Stop video recording"""
+        if self.video_writer:
+            self.video_writer.release()
+            self.video_writer = None
+        self.recording = False
+        duration = time.time() - self.recording_start_time if self.recording_start_time else 0
+        print(f"Recording stopped. Duration: {duration:.1f}s")
+
+    def write_video_frame(self, frame):
+        """Write frame to video file if recording"""
+        if self.recording and self.video_writer:
+            self.video_writer.write(frame)
+
     def draw_touch_buttons(self, frame, show_thermal_only, show_video_only, show_calibration):
         """Draw touchscreen buttons overlay"""
         h, w = frame.shape[:2]
@@ -288,6 +333,10 @@ class ThermalCameraFusion:
             (margin, margin, btn_width, btn_height, "Fusion", not show_thermal_only and not show_video_only),
             (margin + btn_width + margin, margin, btn_width, btn_height, "Thermal", show_thermal_only),
             (margin + (btn_width + margin) * 2, margin, btn_width, btn_height, "Video", show_video_only),
+
+            # Recording buttons
+            (margin + (btn_width + margin) * 3, margin, btn_width, btn_height, "Snapshot", False),
+            (margin + (btn_width + margin) * 4, margin, btn_width, btn_height, "Record" if not self.recording else "Stop", self.recording),
 
             # Calibration button
             (w - btn_width - margin, margin, btn_width, btn_height, "Calibrate", show_calibration),
@@ -367,6 +416,8 @@ class ThermalCameraFusion:
         print("  ,/.: Rotate thermal overlay")
         print("  c: Toggle calibration grid")
         print("  s: Save calibration")
+        print("  p: Take snapshot")
+        print("  r: Toggle recording")
 
         running = True
         fps_time = time.time()
@@ -417,6 +468,19 @@ class ThermalCameraFusion:
                                     show_video_only = True
                                     show_thermal_only = False
                                     print("Video-only mode")
+                                elif label == "Snapshot":
+                                    # Take snapshot of current display
+                                    # We'll capture the frame before buttons are drawn
+                                    snapshot_frame = display_frame.copy()
+                                    self.take_snapshot(snapshot_frame)
+                                elif label == "Record":
+                                    # Start recording
+                                    if not self.recording:
+                                        self.start_recording(self.display_width, self.display_height)
+                                elif label == "Stop":
+                                    # Stop recording
+                                    if self.recording:
+                                        self.stop_recording()
                                 elif label == "Calibrate":
                                     show_calibration = not show_calibration
                                     print(f"Calibration grid: {show_calibration}")
@@ -504,6 +568,18 @@ class ThermalCameraFusion:
                         elif event.key == pygame.K_s:
                             self.save_calibration()
 
+                        # Snapshot
+                        elif event.key == pygame.K_p:
+                            snapshot_frame = display_frame.copy()
+                            self.take_snapshot(snapshot_frame)
+
+                        # Recording toggle
+                        elif event.key == pygame.K_r:
+                            if not self.recording:
+                                self.start_recording(self.display_width, self.display_height)
+                            else:
+                                self.stop_recording()
+
                 # Capture camera frame
                 camera_frame = self.picam.capture_array()
                 camera_frame = cv2.cvtColor(camera_frame, cv2.COLOR_RGB2BGR)
@@ -546,8 +622,25 @@ class ThermalCameraFusion:
                 if show_calibration:
                     display_frame = self.draw_calibration_grid(display_frame)
 
+                # Save frame for recording BEFORE adding buttons
+                if self.recording:
+                    recording_frame = display_frame.copy()
+                    self.write_video_frame(recording_frame)
+
                 # Draw touchscreen buttons
                 display_frame, buttons = self.draw_touch_buttons(display_frame, show_thermal_only, show_video_only, show_calibration)
+
+                # Add recording indicator
+                if self.recording:
+                    # Red recording dot
+                    cv2.circle(display_frame, (self.display_width - 50, 30), 15, (0, 0, 255), -1)
+                    # Recording time
+                    duration = time.time() - self.recording_start_time
+                    mins = int(duration // 60)
+                    secs = int(duration % 60)
+                    rec_text = f"REC {mins:02d}:{secs:02d}"
+                    cv2.putText(display_frame, rec_text, (self.display_width - 150, 40),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
                 # Calculate and display FPS
                 frame_count += 1
@@ -573,6 +666,9 @@ class ThermalCameraFusion:
     def cleanup(self):
         """Clean up resources"""
         print("Cleaning up...")
+        # Stop recording if active
+        if self.recording:
+            self.stop_recording()
         self.picam.stop()
         pygame.quit()
 

@@ -103,6 +103,8 @@ The application includes an on-screen button interface for touchscreen displays:
 - **Fusion** button: Switch to fusion mode (camera + thermal overlay)
 - **Thermal** button: Switch to thermal-only mode
 - **Video** button: Switch to video-only mode (no thermal)
+- **Snapshot** button: Take a JPEG snapshot with timestamp
+- **Record/Stop** button: Start/stop MP4 video recording
 - **Calibrate** button: Toggle calibration grid and controls
 
 **Bottom Row (visible when Calibrate is active):**
@@ -121,6 +123,8 @@ The application includes an on-screen button interface for touchscreen displays:
 - `,`/`.`: Rotate thermal overlay left/right (5° increments)
 - `c`: Toggle calibration grid (shows crosshairs and current settings)
 - `s`: Save calibration to file
+- `p`: Take snapshot (saves JPEG with timestamp)
+- `r`: Start/stop recording (saves MP4 with timestamp)
 
 ### Calibration Process
 
@@ -144,11 +148,32 @@ Since the thermal camera and regular camera are physically offset and have diffe
 
 Calibration settings are saved to `thermal_calibration.json` and loaded automatically on startup.
 
+### Recording and Snapshots
+
+**Taking Snapshots:**
+- Tap the **Snapshot** button or press `p` to capture the current display
+- Snapshots are saved as JPEG files with timestamp filenames
+- Format: `thermal_snapshot_YYYYMMDD_HHMMSS.jpg`
+- Files are saved in the current working directory
+
+**Recording Videos:**
+- Tap the **Record** button or press `r` to start recording
+- Recording indicator appears in top-right corner with elapsed time
+- Tap **Stop** button or press `r` again to stop recording
+- Videos are saved as MP4 files with H.264 codec for cross-platform compatibility
+- Format: `thermal_video_YYYYMMDD_HHMMSS.mp4`
+- Compatible with iPhone, Windows 11, macOS, and other platforms
+- Files are saved in the current working directory
+
+**Note:** Recorded videos and snapshots do NOT include the on-screen buttons, but they do include the temperature overlay, calibration grid (if visible), and recording indicator.
+
 ## Features
 
 - Real-time thermal camera overlay on regular camera feed
 - Three display modes: Fusion, Thermal-only, and Video-only
 - Touchscreen button interface for easy control
+- **Video recording and snapshot capture** with timestamped filenames
+- **Cross-platform MP4 video format** (H.264 codec)
 - Manual alignment controls for position, scale, and rotation
 - Adjustable fusion alpha (transparency)
 - Temperature scale with min/max display
