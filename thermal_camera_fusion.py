@@ -24,11 +24,15 @@ import time
 import numpy as np
 import cv2
 from picamera2 import Picamera2
+from picamera2.encoders import H264Encoder
+from picamera2.outputs import FfmpegOutput
 import pygame
 from PIL import Image
 import json
 import argparse
 from datetime import datetime
+import glob
+import os
 
 # Force SDL to position window at specific location if needed
 # This helps with multi-monitor setups
@@ -94,11 +98,38 @@ class ThermalCameraFusion:
 
         # Color map for thermal data (iron colormap approximation)
         self.colormap = cv2.COLORMAP_JET
+        self.colormap_name = "JET"
+        self.available_colormaps = {
+            "JET": cv2.COLORMAP_JET,
+            "HOT": cv2.COLORMAP_HOT,
+            "COOL": cv2.COLORMAP_COOL,
+            "RAINBOW": cv2.COLORMAP_RAINBOW,
+            "BONE": cv2.COLORMAP_BONE,
+            "TURBO": cv2.COLORMAP_TURBO,
+        }
 
         # Recording state
         self.recording = False
         self.video_writer = None
+        self.recording_filename = None
         self.recording_start_time = None
+        self.recording_fps = 10.0
+
+        # Settings state
+        self.show_histogram = False
+        self.show_settings = False
+        self.show_gallery = False
+
+        # Gallery state
+        self.gallery_files = []
+        self.gallery_index = 0
+        self.gallery_image = None
+
+        # Frame interpolation state
+        self.enable_interpolation = True
+        self.previous_thermal_frame = None
+        self.last_thermal_capture_time = time.time()
+        self.interpolation_alpha = 0.0
 
     def read_thermal_frame(self):
         """Read frame from thermal camera or generate demo data"""
@@ -139,6 +170,38 @@ class ThermalCameraFusion:
             except ValueError:
                 # Frame not ready, return previous frame
                 return np.reshape(self.thermal_frame, (24, 32))
+
+    def interpolate_thermal_frame(self, current_frame):
+        """Interpolate between thermal frames for smoother animation"""
+        if not self.enable_interpolation:
+            return current_frame
+
+        # Check if we have a previous frame to interpolate with
+        if self.previous_thermal_frame is None:
+            self.previous_thermal_frame = current_frame.copy()
+            self.last_thermal_capture_time = time.time()
+            return current_frame
+
+        # Calculate time-based interpolation factor
+        # MLX90640 updates at ~8Hz (125ms between frames)
+        current_time = time.time()
+        time_since_capture = current_time - self.last_thermal_capture_time
+        expected_frame_time = 0.125  # 8Hz = 125ms
+
+        # Check if we should get a new thermal frame
+        if time_since_capture >= expected_frame_time:
+            # New frame available, update tracking
+            self.previous_thermal_frame = current_frame.copy()
+            self.last_thermal_capture_time = current_time
+            self.interpolation_alpha = 0.0
+            return current_frame
+        else:
+            # Interpolate between previous and current frame
+            self.interpolation_alpha = time_since_capture / expected_frame_time
+            # Smooth interpolation using linear blend
+            interpolated = (1 - self.interpolation_alpha) * self.previous_thermal_frame + \
+                          self.interpolation_alpha * current_frame
+            return interpolated
 
     def process_thermal_image(self, thermal_data):
         """Convert thermal data to colored image with calibration transforms"""
@@ -285,34 +348,311 @@ class ThermalCameraFusion:
         print(f"Snapshot saved: {filename}")
         return filename
 
+    def cycle_colormap(self):
+        """Cycle to next colormap"""
+        colormap_names = list(self.available_colormaps.keys())
+        current_index = colormap_names.index(self.colormap_name)
+        next_index = (current_index + 1) % len(colormap_names)
+        self.colormap_name = colormap_names[next_index]
+        self.colormap = self.available_colormaps[self.colormap_name]
+        print(f"Colormap: {self.colormap_name}")
+
     def start_recording(self, frame_width, frame_height):
-        """Start video recording"""
+        """Start video recording with software encoding (thermal overlay)"""
+        # Note: We use software encoding to capture the thermal overlay
+        # Hardware encoding would only record the raw camera feed without overlay
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"thermal_video_{timestamp}.mp4"
+        self.recording_filename = f"thermal_video_{timestamp}.mp4"
 
-        # Use H.264 codec (MP4V as fallback) for cross-platform compatibility
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fps = 10.0  # Recording FPS
+        # Try different codecs in order of preference
+        codecs_to_try = [
+            ('mp4v', 'MPEG-4'),
+            ('XVID', 'Xvid'),
+            ('MJPG', 'Motion JPEG'),
+        ]
 
-        self.video_writer = cv2.VideoWriter(filename, fourcc, fps, (frame_width, frame_height))
-        self.recording = True
-        self.recording_start_time = time.time()
-        print(f"Recording started: {filename}")
-        return filename
+        for fourcc_str, codec_name in codecs_to_try:
+            fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+            self.video_writer = cv2.VideoWriter(self.recording_filename, fourcc,
+                                               self.recording_fps, (frame_width, frame_height))
+
+            if self.video_writer.isOpened():
+                self.recording = True
+                self.recording_start_time = time.time()
+                print(f"Recording started with {codec_name} encoding: {self.recording_filename}")
+                return self.recording_filename
+            else:
+                self.video_writer = None
+
+        print("Failed to start recording - no compatible codec found")
+        return None
 
     def stop_recording(self):
         """Stop video recording"""
+        duration = time.time() - self.recording_start_time if self.recording_start_time else 0
+
+        # Stop OpenCV writer
         if self.video_writer:
             self.video_writer.release()
             self.video_writer = None
+            print(f"Recording stopped. Duration: {duration:.1f}s")
+
         self.recording = False
-        duration = time.time() - self.recording_start_time if self.recording_start_time else 0
-        print(f"Recording stopped. Duration: {duration:.1f}s")
 
     def write_video_frame(self, frame):
         """Write frame to video file if recording"""
         if self.recording and self.video_writer:
             self.video_writer.write(frame)
+
+    def draw_histogram(self, frame, thermal_data, min_temp, max_temp):
+        """Draw temperature histogram"""
+        h, w = frame.shape[:2]
+
+        # Histogram parameters
+        hist_width = min(300, int(w * 0.25))
+        hist_height = min(200, int(h * 0.20))
+        hist_x = 20
+        hist_y = h - hist_height - 80
+
+        # Create histogram
+        bins = 50
+        hist, bin_edges = np.histogram(thermal_data.flatten(), bins=bins, range=(min_temp, max_temp))
+
+        # Normalize histogram
+        if hist.max() > 0:
+            hist_normalized = (hist / hist.max() * (hist_height - 20)).astype(int)
+        else:
+            hist_normalized = np.zeros_like(hist, dtype=int)
+
+        # Draw histogram background
+        cv2.rectangle(frame, (hist_x, hist_y), (hist_x + hist_width, hist_y + hist_height),
+                     (40, 40, 40), -1)
+        cv2.rectangle(frame, (hist_x, hist_y), (hist_x + hist_width, hist_y + hist_height),
+                     (200, 200, 200), 2)
+
+        # Draw bars
+        bar_width = hist_width / bins
+        for i, count in enumerate(hist_normalized):
+            if count > 0:
+                x1 = int(hist_x + i * bar_width)
+                x2 = int(hist_x + (i + 1) * bar_width)
+                y1 = hist_y + hist_height - 10
+                y2 = y1 - count
+
+                # Color bars based on temperature range
+                temp_ratio = i / bins
+                color_value = int(temp_ratio * 255)
+                bar_color = cv2.applyColorMap(np.array([[color_value]], dtype=np.uint8), self.colormap)[0][0]
+                color = (int(bar_color[0]), int(bar_color[1]), int(bar_color[2]))
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, -1)
+
+        # Draw title
+        cv2.putText(frame, "Temperature Distribution", (hist_x + 5, hist_y + 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+        return frame
+
+    def load_gallery_files(self):
+        """Load list of saved snapshots and videos"""
+        # Find all thermal snapshots and videos in current directory
+        snapshots = glob.glob("thermal_snapshot_*.jpg")
+        videos = glob.glob("thermal_video_*.mp4")
+
+        # Combine and sort by modification time (newest first)
+        all_files = [(f, os.path.getmtime(f)) for f in snapshots + videos]
+        all_files.sort(key=lambda x: x[1], reverse=True)
+
+        self.gallery_files = [f[0] for f in all_files]
+        self.gallery_index = 0
+
+        if self.gallery_files:
+            self.load_gallery_image(self.gallery_files[self.gallery_index])
+
+        return len(self.gallery_files)
+
+    def load_gallery_image(self, filename):
+        """Load an image for gallery display"""
+        try:
+            if filename.endswith('.jpg'):
+                # Load snapshot (already rotated 90 degrees clockwise when saved)
+                self.gallery_image = cv2.imread(filename)
+                if self.gallery_image is not None:
+                    # Flip horizontally (mirror image)
+                    self.gallery_image = cv2.flip(self.gallery_image, 1)
+            elif filename.endswith('.mp4'):
+                # Load first frame of video as thumbnail
+                cap = cv2.VideoCapture(filename)
+                ret, frame = cap.read()
+                cap.release()
+                if ret:
+                    self.gallery_image = frame
+                else:
+                    self.gallery_image = None
+        except Exception as e:
+            print(f"Error loading gallery file {filename}: {e}")
+            self.gallery_image = None
+
+    def gallery_next(self):
+        """Navigate to next image in gallery"""
+        if self.gallery_files and self.gallery_index < len(self.gallery_files) - 1:
+            self.gallery_index += 1
+            self.load_gallery_image(self.gallery_files[self.gallery_index])
+
+    def gallery_previous(self):
+        """Navigate to previous image in gallery"""
+        if self.gallery_files and self.gallery_index > 0:
+            self.gallery_index -= 1
+            self.load_gallery_image(self.gallery_files[self.gallery_index])
+
+    def delete_current_gallery_file(self):
+        """Delete currently displayed gallery file"""
+        if self.gallery_files and 0 <= self.gallery_index < len(self.gallery_files):
+            filename = self.gallery_files[self.gallery_index]
+            try:
+                os.remove(filename)
+                print(f"Deleted: {filename}")
+
+                # Remove from list
+                del self.gallery_files[self.gallery_index]
+
+                # Adjust index and load next/previous image
+                if self.gallery_files:
+                    if self.gallery_index >= len(self.gallery_files):
+                        self.gallery_index = len(self.gallery_files) - 1
+                    self.load_gallery_image(self.gallery_files[self.gallery_index])
+                else:
+                    self.gallery_image = None
+                    self.show_gallery = False
+                    print("Gallery is empty")
+            except Exception as e:
+                print(f"Error deleting file: {e}")
+
+    def draw_gallery(self, frame):
+        """Draw gallery overlay"""
+        if not self.gallery_image is None:
+            h, w = frame.shape[:2]
+
+            # Scale gallery image to fit display while maintaining aspect ratio
+            gh, gw = self.gallery_image.shape[:2]
+            scale = min(w / gw, h / gh) * 0.8  # Use 80% of screen
+
+            new_w = int(gw * scale)
+            new_h = int(gh * scale)
+
+            gallery_resized = cv2.resize(self.gallery_image, (new_w, new_h))
+
+            # Center the image
+            x_offset = (w - new_w) // 2
+            y_offset = (h - new_h) // 2
+
+            # Draw semi-transparent black background
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 0), -1)
+            frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
+
+            # Place gallery image
+            frame[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = gallery_resized
+
+            # Draw border around image
+            cv2.rectangle(frame, (x_offset-2, y_offset-2),
+                         (x_offset+new_w+2, y_offset+new_h+2), (255, 255, 255), 2)
+
+        # Draw filename and navigation info
+        if self.gallery_files:
+            filename = self.gallery_files[self.gallery_index]
+            info_text = f"{self.gallery_index + 1}/{len(self.gallery_files)}: {filename}"
+
+            # Get file size and date
+            file_size = os.path.getsize(filename) / 1024  # KB
+            file_time = datetime.fromtimestamp(os.path.getmtime(filename)).strftime("%Y-%m-%d %H:%M:%S")
+            size_text = f"{file_size:.1f} KB - {file_time}"
+
+            # Draw info bar at bottom
+            cv2.rectangle(frame, (0, h-80), (w, h), (40, 40, 40), -1)
+            cv2.putText(frame, info_text, (20, h-50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, size_text, (20, h-25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+
+            # Draw controls on right side
+            controls_text = [
+                "Arrow Left/Right: Navigate",
+                "Delete: Remove file",
+                "G: Close gallery"
+            ]
+            y_pos = h - 70
+            for text in controls_text:
+                text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+                cv2.putText(frame, text, (w - text_size[0] - 20, y_pos),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                y_pos += 20
+        else:
+            # No files in gallery
+            text = "No saved images or videos found"
+            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+            cv2.putText(frame, text, ((w - text_size[0]) // 2, h // 2),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+
+        return frame
+
+    def draw_settings_panel(self, frame):
+        """Draw settings panel overlay"""
+        h, w = frame.shape[:2]
+
+        # Settings text to display
+        settings_text = [
+            "SETTINGS",
+            f"Colormap: {self.colormap_name}",
+            f"Recording FPS: {self.recording_fps:.0f}",
+            f"Histogram: {'ON' if self.show_histogram else 'OFF'}",
+            f"Interpolation: {'ON' if self.enable_interpolation else 'OFF'}",
+            "",
+            "Press 'h' to toggle histogram",
+            "Press 'k' to cycle colormap",
+            "Press 'i' to toggle interpolation",
+            "Press 'm' to close settings",
+        ]
+
+        # Calculate panel size based on content
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 1
+        line_height = 22  # Reduced from 35 for tighter spacing
+        padding = 15
+
+        # Calculate required width (find longest line)
+        max_width = 0
+        for text in settings_text:
+            text_size = cv2.getTextSize(text, font, font_scale if text != "SETTINGS" else 0.7,
+                                       font_thickness if text != "SETTINGS" else 2)[0]
+            max_width = max(max_width, text_size[0])
+
+        # Panel dimensions with padding
+        panel_width = max_width + (padding * 2)
+        panel_height = len(settings_text) * line_height + padding * 2
+        panel_x = w - panel_width - 20
+        panel_y = 100
+
+        # Draw panel background
+        cv2.rectangle(frame, (panel_x, panel_y), (panel_x + panel_width, panel_y + panel_height),
+                     (40, 40, 40), -1)
+        cv2.rectangle(frame, (panel_x, panel_y), (panel_x + panel_width, panel_y + panel_height),
+                     (200, 200, 200), 2)
+
+        # Draw text
+        y_pos = panel_y + padding + 15
+        for i, text in enumerate(settings_text):
+            if text == "SETTINGS":
+                # Title with larger font
+                cv2.putText(frame, text, (panel_x + padding, y_pos),
+                           font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+            elif text:  # Skip empty lines for spacing
+                cv2.putText(frame, text, (panel_x + padding, y_pos),
+                           font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
+            y_pos += line_height
+
+        return frame
 
     def draw_touch_buttons(self, frame, show_thermal_only, show_video_only, show_calibration):
         """Draw touchscreen buttons overlay"""
@@ -338,7 +678,9 @@ class ThermalCameraFusion:
             (margin + (btn_width + margin) * 3, margin, btn_width, btn_height, "Snapshot", False),
             (margin + (btn_width + margin) * 4, margin, btn_width, btn_height, "Record" if not self.recording else "Stop", self.recording),
 
-            # Calibration button
+            # Gallery, Settings and Calibration buttons
+            (w - (btn_width + margin) * 3, margin, btn_width, btn_height, "Gallery", self.show_gallery),
+            (w - (btn_width + margin) * 2, margin, btn_width, btn_height, "Settings", self.show_settings),
             (w - btn_width - margin, margin, btn_width, btn_height, "Calibrate", show_calibration),
 
             # Control buttons (bottom row) - only show in calibration mode
@@ -418,6 +760,12 @@ class ThermalCameraFusion:
         print("  s: Save calibration")
         print("  p: Take snapshot")
         print("  r: Toggle recording")
+        print("  m: Toggle settings menu")
+        print("  h: Toggle histogram")
+        print("  k: Cycle colormap")
+        print("  i: Toggle frame interpolation")
+        print("  g: Toggle gallery")
+        print("  In gallery: Arrow keys navigate, Delete removes file")
 
         running = True
         fps_time = time.time()
@@ -481,6 +829,16 @@ class ThermalCameraFusion:
                                     # Stop recording
                                     if self.recording:
                                         self.stop_recording()
+                                elif label == "Gallery":
+                                    self.show_gallery = not self.show_gallery
+                                    if self.show_gallery:
+                                        count = self.load_gallery_files()
+                                        print(f"Gallery opened: {count} files")
+                                    else:
+                                        print("Gallery closed")
+                                elif label == "Settings":
+                                    self.show_settings = not self.show_settings
+                                    print(f"Settings panel: {self.show_settings}")
                                 elif label == "Calibrate":
                                     show_calibration = not show_calibration
                                     print(f"Calibration grid: {show_calibration}")
@@ -529,7 +887,15 @@ class ThermalCameraFusion:
                             fusion_alpha = max(0.0, fusion_alpha - 0.1)
                             print(f"Fusion alpha: {fusion_alpha:.1f}")
 
-                        # Arrow keys for position
+                        # Gallery navigation (handle BEFORE arrow keys for thermal adjustment)
+                        elif self.show_gallery and event.key == pygame.K_LEFT:
+                            self.gallery_previous()
+                        elif self.show_gallery and event.key == pygame.K_RIGHT:
+                            self.gallery_next()
+                        elif self.show_gallery and event.key == pygame.K_DELETE:
+                            self.delete_current_gallery_file()
+
+                        # Arrow keys for position (only when gallery is NOT open)
                         elif event.key == pygame.K_LEFT:
                             self.thermal_offset_x -= move_step
                             print(f"Offset X: {self.thermal_offset_x}")
@@ -580,12 +946,44 @@ class ThermalCameraFusion:
                             else:
                                 self.stop_recording()
 
+                        # Settings menu
+                        elif event.key == pygame.K_m:
+                            self.show_settings = not self.show_settings
+                            print(f"Settings panel: {self.show_settings}")
+
+                        # Toggle histogram
+                        elif event.key == pygame.K_h:
+                            self.show_histogram = not self.show_histogram
+                            print(f"Histogram: {self.show_histogram}")
+
+                        # Cycle colormap
+                        elif event.key == pygame.K_k:
+                            self.cycle_colormap()
+
+                        # Toggle interpolation
+                        elif event.key == pygame.K_i:
+                            self.enable_interpolation = not self.enable_interpolation
+                            print(f"Frame interpolation: {self.enable_interpolation}")
+
+                        # Gallery toggle
+                        elif event.key == pygame.K_g:
+                            self.show_gallery = not self.show_gallery
+                            if self.show_gallery:
+                                count = self.load_gallery_files()
+                                print(f"Gallery opened: {count} files")
+                            else:
+                                print("Gallery closed")
+
                 # Capture camera frame
                 camera_frame = self.picam.capture_array()
                 camera_frame = cv2.cvtColor(camera_frame, cv2.COLOR_RGB2BGR)
 
                 # Read thermal frame
                 thermal_data = self.read_thermal_frame()
+
+                # Apply interpolation for smoother thermal updates
+                thermal_data = self.interpolate_thermal_frame(thermal_data)
+
                 thermal_image, min_temp, max_temp = self.process_thermal_image(thermal_data)
 
                 # Determine display mode
@@ -622,13 +1020,25 @@ class ThermalCameraFusion:
                 if show_calibration:
                     display_frame = self.draw_calibration_grid(display_frame)
 
-                # Save frame for recording BEFORE adding buttons
+                # Add histogram if enabled
+                if self.show_histogram and not show_video_only:
+                    display_frame = self.draw_histogram(display_frame, thermal_data, min_temp, max_temp)
+
+                # Save frame for recording BEFORE adding buttons and overlays
                 if self.recording:
                     recording_frame = display_frame.copy()
                     self.write_video_frame(recording_frame)
 
                 # Draw touchscreen buttons
                 display_frame, buttons = self.draw_touch_buttons(display_frame, show_thermal_only, show_video_only, show_calibration)
+
+                # Add settings panel if enabled
+                if self.show_settings:
+                    display_frame = self.draw_settings_panel(display_frame)
+
+                # Add gallery overlay if enabled (drawn on top of everything)
+                if self.show_gallery:
+                    display_frame = self.draw_gallery(display_frame)
 
                 # Add recording indicator
                 if self.recording:
