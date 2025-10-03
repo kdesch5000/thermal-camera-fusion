@@ -105,6 +105,8 @@ The application includes an on-screen button interface for touchscreen displays:
 - **Video** button: Switch to video-only mode (no thermal)
 - **Snapshot** button: Take a JPEG snapshot with timestamp
 - **Record/Stop** button: Start/stop MP4 video recording
+- **Gallery** button: Browse saved snapshots and videos
+- **Settings** button: Toggle settings panel
 - **Calibrate** button: Toggle calibration grid and controls
 
 **Bottom Row (visible when Calibrate is active):**
@@ -125,6 +127,12 @@ The application includes an on-screen button interface for touchscreen displays:
 - `s`: Save calibration to file
 - `p`: Take snapshot (saves JPEG with timestamp)
 - `r`: Start/stop recording (saves MP4 with timestamp)
+- `m`: Toggle settings menu
+- `h`: Toggle temperature histogram
+- `k`: Cycle through colormaps (JET, HOT, COOL, RAINBOW, BONE, TURBO)
+- `i`: Toggle frame interpolation (smooths thermal updates)
+- `g`: Open/close gallery
+- **Gallery navigation**: Arrow keys (left/right), Delete key to remove files
 
 ### Calibration Process
 
@@ -160,12 +168,80 @@ Calibration settings are saved to `thermal_calibration.json` and loaded automati
 - Tap the **Record** button or press `r` to start recording
 - Recording indicator appears in top-right corner with elapsed time
 - Tap **Stop** button or press `r` again to stop recording
-- Videos are saved as MP4 files with H.264 codec for cross-platform compatibility
+- Videos are saved as MP4 files for cross-platform compatibility
 - Format: `thermal_video_YYYYMMDD_HHMMSS.mp4`
 - Compatible with iPhone, Windows 11, macOS, and other platforms
+- Records the full thermal overlay as displayed (including temperature scale and calibration grid if visible)
 - Files are saved in the current working directory
 
 **Note:** Recorded videos and snapshots do NOT include the on-screen buttons, but they do include the temperature overlay, calibration grid (if visible), and recording indicator.
+
+### Image Gallery
+
+Browse, view, and manage your saved thermal snapshots and videos without leaving the application:
+
+**Features:**
+- View all saved snapshots (`.jpg`) and video thumbnails (`.mp4`)
+- Files sorted by date (newest first)
+- Navigate with arrow keys or swipe gestures
+- Delete unwanted files instantly
+- Shows file information (name, size, date)
+- Automatically rotates snapshots for correct orientation
+
+**Usage:**
+- Tap **Gallery** button or press `g` to open
+- Use **Left/Right arrow keys** to navigate between files
+- Press **Delete** key to remove the current file
+- Press `g` again to close gallery
+- Gallery displays the first frame of videos as thumbnails
+
+**Display:**
+- Images are scaled to fit 80% of screen while maintaining aspect ratio
+- Semi-transparent dark background for better visibility
+- White border around images
+- Info bar shows: file index, filename, size, and timestamp
+
+### Settings Menu
+
+Access the settings panel by tapping the **Settings** button or pressing `m`:
+
+**Available Settings:**
+- **Colormap Selection**: Cycle through different thermal colormaps
+  - JET (blue-red, default)
+  - HOT (black-red-yellow-white)
+  - COOL (cyan-magenta)
+  - RAINBOW (full spectrum)
+  - BONE (grayscale-blue)
+  - TURBO (perceptually uniform)
+- **Recording FPS**: Current video recording frame rate
+- **Histogram Toggle**: Enable/disable temperature distribution display
+- **Frame Interpolation**: Smooth thermal updates between 8Hz sensor readings
+
+Press `k` to quickly cycle through colormaps, `h` to toggle the histogram, or `i` to toggle interpolation without opening settings.
+
+### Temperature Histogram
+
+Enable the histogram (press `h` or via Settings menu) to see:
+- Live temperature distribution across the thermal image
+- Color-coded bars matching your selected colormap
+- Useful for identifying temperature anomalies and patterns
+- Automatically hidden in video-only mode
+
+### Frame Interpolation
+
+The MLX90640 thermal sensor updates at 8Hz (~125ms between frames), while the display may run at higher frame rates. Frame interpolation smooths thermal data between sensor readings:
+
+**Benefits:**
+- Eliminates jerky thermal overlay motion
+- Creates smoother temperature transitions
+- Better visual experience for moving heat sources
+- No impact on actual temperature accuracy
+
+**How it works:**
+- Linearly interpolates between consecutive thermal frames based on elapsed time
+- Automatically syncs with the 8Hz sensor refresh rate
+- Toggle on/off with `i` key if you prefer raw sensor updates
+- Enabled by default for smoother visualization
 
 ## Features
 
@@ -173,14 +249,18 @@ Calibration settings are saved to `thermal_calibration.json` and loaded automati
 - Three display modes: Fusion, Thermal-only, and Video-only
 - Touchscreen button interface for easy control
 - **Video recording and snapshot capture** with timestamped filenames
-- **Cross-platform MP4 video format** (H.264 codec)
+- **Image gallery** to browse and manage saved files
+- **Cross-platform MP4 video format** compatible with all devices
+- **Settings menu** with configurable options
+- **6 thermal colormaps** (JET, HOT, COOL, RAINBOW, BONE, TURBO)
+- **Temperature histogram** for distribution analysis
+- **Frame interpolation** for smooth 8Hz to display fps conversion
 - Manual alignment controls for position, scale, and rotation
 - Adjustable fusion alpha (transparency)
 - Temperature scale with min/max display
 - FPS counter
 - Calibration grid with live parameter display
 - Persistent calibration settings
-- Color-coded temperature visualization using JET colormap
 - Demo mode for testing without hardware
 
 ## Display Settings
